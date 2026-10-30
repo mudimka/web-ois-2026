@@ -1,9 +1,29 @@
-from pydantic import AwareDatetime, BaseModel, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 
 class Club(BaseModel):
     id: int
-    name: str
+    name: str = Field(examples=["Клуб робототехники"])
+
+
+class ClubBase(BaseModel):
+    # Пробелы по краям обрезаются до проверки длины: «  a  » станет «a» и не пройдёт min_length
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(
+        min_length=2,
+        max_length=100,
+        description="Название клуба, от 2 до 100 символов. Пробелы по краям обрезаются.",
+        examples=["Клуб робототехники"],
+    )
+
+
+class ClubCreate(ClubBase):
+    """Данные для создания клуба."""
+
+
+class ClubUpdate(ClubBase):
+    """Новое название клуба."""
 
 
 class Room(BaseModel):
