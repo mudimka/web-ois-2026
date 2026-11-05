@@ -65,3 +65,43 @@ CREATE TABLE registrations (
 
 CREATE UNIQUE INDEX registrations_one_active on registrations (event_id, user_id)
     WHERE status = 'active';
+
+-- Теги мероприятий: связь «многие ко многим» через таблицу event_tags.
+CREATE TABLE tags (
+    id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name            text NOT NULL
+        CONSTRAINT tags_name_not_blank CHECK (length(btrim(name)) > 0)
+);
+
+-- Название тега уникально без учёта регистра: «IT» и «it» — один тег
+CREATE UNIQUE INDEX tags_name_key ON tags (lower(name));
+
+CREATE TABLE event_tags (
+    event_id        bigint NOT NULL
+        CONSTRAINT event_tags_event_fk REFERENCES events (id) ON DELETE CASCADE,
+    tag_id          bigint NOT NULL
+        CONSTRAINT event_tags_tag_fk REFERENCES tags (id) ON DELETE CASCADE,
+
+    -- Один и тот же тег на одно мероприятие дважды не ставится
+    CONSTRAINT event_tags_pkey PRIMARY KEY (event_id, tag_id)
+);
+
+-- Первичный ключ ускоряет поиск тегов мероприятия; этот индекс — поиск мероприятий по тегу
+CREATE INDEX event_tags_tag_idx ON event_tags (tag_id);
+
+
+-- Отзывы студентов о мероприятиях
+CREATE TABLE reviews (
+    id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    event_id        bigint NOT NULL
+        CONSTRAINT reviews_event_fk REFERENCES events (id) ON DELETE CASCADE,
+    user_id         bigint NOT NULL
+        CONSTRAINT reviews_user_fk REFERENCES users (id) ON DELETE CASCADE,
+    rating          smallint NOT NULL,
+    comment         text,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+
+    CONSTRAINT reviews_rating_range CHECK (rating BETWEEN 1 AND 5),
+    -- Один студент — один отзыв на мероприятие
+    CONSTRAINT reviews_one_per_user_event UNIQUE (event_id, user_id)
+);

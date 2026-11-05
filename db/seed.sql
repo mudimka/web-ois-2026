@@ -5,7 +5,7 @@ INSERT INTO users (email, full_name, password_hash, role) VALUES
                                                               ('anna@web-ois.local',    'Анна Смирнова',              '-', 'student'),
                                                               ('boris@web-ois.local',   'Борис Ковалёв',              '-', 'student'),
                                                               ('vera@web-ois.local',    'Вера Лебедева',              '-', 'student'),
-                                                              ('denis@web-ois.local',   'Денис Орлов',                '-', 'student');
+                                                              ('dima@web-ois.local',   'Запоточный Дмитрий',                '-', 'student');
 
 INSERT INTO clubs (name, slug, description) VALUES
                                                 ('IT-клуб',        'it-club', 'Лекции и мастер-классы по разработке'),
@@ -58,3 +58,30 @@ WHERE (e.title, u.email) IN (
                              ('Мастер-класс: Git без боли', 'anna@web-ois.local')
     )
 ORDER BY e.id, u.id;
+
+INSERT INTO tags (name) VALUES
+                            ('лекция'),
+                            ('IT'),
+                            ('турнир'),
+                            ('кино');
+
+INSERT INTO event_tags (event_id, tag_id)
+SELECT e.id, t.id FROM events e, tags t
+WHERE (e.title, t.name) IN (
+                            ('Как устроен поиск Яндекса',  'лекция'),
+                            ('Как устроен поиск Яндекса',  'IT'),
+                            ('Мастер-класс: Git без боли', 'IT'),
+                            ('Турнир по шахматам',         'турнир'),
+                            ('Кино: «Сталкер»',            'кино')
+    )
+ORDER BY e.id, t.id;
+
+INSERT INTO reviews (event_id, user_id, rating, comment)
+SELECT e.id, u.id, v.rating, v.comment
+FROM (VALUES
+          ('anna@web-ois.local',  5, 'Отличная лекция, много конкретики'),
+          ('boris@web-ois.local', 4, NULL)
+     ) AS v(email, rating, comment)
+         JOIN users u ON u.email = v.email
+         JOIN events e ON e.title = 'Как устроен поиск Яндекса'
+ORDER BY u.id;
