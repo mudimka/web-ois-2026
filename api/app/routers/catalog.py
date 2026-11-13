@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api", tags=["Справочники"])
 
 @router.get("/clubs", response_model=list[Club], summary="Клубы")
 def list_clubs(session: SessionDep):
-    return session.scalars(select(ClubModel)).order_by(ClubModel.name).all()
+    return session.scalars(select(ClubModel).order_by(ClubModel.name)).all()
 
 
 @router.get(
