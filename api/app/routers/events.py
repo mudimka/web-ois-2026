@@ -8,8 +8,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import SessionDep, violated_constraint
-from app.models import Club, Event, Room
-from app.schemas import ErrorResponse, EventCreate, EventPage, EventRead, EventUpdate
+from app.models import Club, Event, Registration, Room
+from app.schemas import (
+    ErrorResponse,
+    EventBase,
+    EventCreate,
+    EventPage,
+    EventRead,
+    EventUpdate,
+)
 
 router = APIRouter(prefix="/api/events", tags=["Мероприятия"])
 
@@ -25,6 +32,35 @@ def get_event_or_404(session: Session, event_id: int) -> Event:
     if event is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Мероприятие не найдено")
     return event
+
+
+def free_seats_column():
+    """Столбец «свободные места» для SELECT: вместимость минус число активных записей.
+
+    Это коррелированный подзапрос: Postgres считает записи прямо в том же запросе,
+    что выбирает мероприятия, поэтому отдельных запросов на каждое мероприятие нет."""
+    active = (
+        select(func.count(Registration.id))
+        .where(Registration.event_id == Event.id, Registration.status == "active")
+        .correlate(Event)
+        .scalar_subquery()
+    )
+    return (Event.capacity - active).label("free_seats")
+
+
+def to_read(event: Event, free_seats: int) -> EventRead:
+    data = {name: getattr(event, name) for name in EventBase.model_fields}
+    return EventRead(id=event.id, free_seats=free_seats, **data)
+
+
+def get_event_read_or_404(session: Session, event_id: int) -> EventRead:
+    """Мероприятие вместе со свободными местами — одним запросом."""
+    row = session.execute(
+        select(Event, free_seats_column()).where(Event.id == event_id)
+    ).first()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Мероприятие не найдено")
+    return to_read(*row)
 
 
 def check_business_rules(session: Session, data: dict, event_id: int | None = None) -> Club:
@@ -81,25 +117,31 @@ def list_events(
         page: Annotated[int, Query(ge=1, description="Номер страницы")] = 1,
         size: Annotated[int, Query(ge=1, le=100, description="Мероприятий на странице")] = 20,
 ):
-    query = select(Event).where(Event.status == "published")
+    conditions = [Event.status == "published"]
     if club_id is not None:
-        query = query.where(Event.club_id == club_id)
+        conditions.append(Event.club_id == club_id)
     if date_from is not None:
-        query = query.where(Event.starts_at >= datetime.combine(date_from, time.min, TOMSK))
+        conditions.append(Event.starts_at >= datetime.combine(date_from, time.min, TOMSK))
     if date_to is not None:
         next_day = date_to + timedelta(days=1)
-        query = query.where(Event.starts_at < datetime.combine(next_day, time.min, TOMSK))
+        conditions.append(Event.starts_at < datetime.combine(next_day, time.min, TOMSK))
 
-    total = session.scalar(select(func.count()).select_from(query.subquery()))
-    items = session.scalars(
-        query.order_by(Event.starts_at, Event.id).offset((page - 1) * size).limit(size)
+    # Всего два запроса, сколько бы мероприятий ни было на странице:
+    # один считает общее число, второй берёт страницу вместе со свободными местами.
+    total = session.scalar(select(func.count()).select_from(Event).where(*conditions))
+    rows = session.execute(
+        select(Event, free_seats_column())
+        .where(*conditions)
+        .order_by(Event.starts_at, Event.id)
+        .offset((page - 1) * size)
+        .limit(size)
     ).all()
-    return {"items": items, "total": total, "page": page, "size": size}
+    return {"items": [to_read(*row) for row in rows], "total": total, "page": page, "size": size}
 
 
 @router.get("/{event_id}", response_model=EventRead, responses=NOT_FOUND, summary="Одно мероприятие")
 def get_event(event_id: int, session: SessionDep):
-    return get_event_or_404(session, event_id)
+    return get_event_read_or_404(session, event_id)
 
 
 @router.post(
@@ -120,7 +162,7 @@ def create_event(payload: EventCreate, session: SessionDep):
     event = Event(**data, author=club.organizers[0])
     session.add(event)
     commit_or_409(session)
-    return event
+    return get_event_read_or_404(session, event.id)
 
 
 @router.patch(
@@ -143,7 +185,7 @@ def update_event(event_id: int, payload: EventUpdate, session: SessionDep):
     for name, value in checked.items():
         setattr(event, name, value)
     commit_or_409(session)
-    return event
+    return get_event_read_or_404(session, event_id)
 
 
 @router.delete(

@@ -49,6 +49,10 @@ class EventUpdate(BaseModel):
 
 class EventRead(EventBase):
     id: int
+    free_seats: int = Field(
+        description="Сколько мест осталось: вместимость мероприятия минус активные записи",
+        examples=[38],
+    )
 
 
 class EventPage(BaseModel):
