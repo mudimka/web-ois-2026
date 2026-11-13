@@ -1,9 +1,10 @@
 from fastapi import FastAPI
 
-from app.routers import catalog, events, system
+from app.routers import catalog, events, registrations, system
 
 TAGS = [
     {"name": "Мероприятия", "description": "Афиша: создание, просмотр, изменение и удаление."},
+    {"name": "Записи", "description": "Запись студентов на мероприятия и её отмена."},
     {"name": "Справочники", "description": "Клубы и аудитории."},
     {"name": "Служебное", "description": "Проверка, что сервис жив."},
 ]
@@ -18,3 +19,4 @@ app = FastAPI(
 app.include_router(system.router)
 app.include_router(catalog.router)
 app.include_router(events.router)
+app.include_router(registrations.router)
