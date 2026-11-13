@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.models import Club, Event, Registration, Room, User
+from app.models import Club, Event, Registration, Room, Tag, User
 
 TOMSK = timezone(timedelta(hours=7))
 
@@ -64,6 +64,15 @@ def main() -> None:
         )
         session.add_all([yandex, tournament, git, stalker, cancelled])
 
+        lecture, it, tourney, cinema_tag = (
+            Tag(name="лекция"), Tag(name="IT"), Tag(name="турнир"), Tag(name="кино")
+        )
+        session.add_all([lecture, it, tourney, cinema_tag])
+        yandex.tags = [lecture, it]
+        git.tags = [it]
+        tournament.tags = [tourney]
+        stalker.tags = [cinema_tag]
+
         session.add_all([
             Registration(event=yandex, user=anna),
             Registration(event=yandex, user=boris),
@@ -72,7 +81,7 @@ def main() -> None:
         ])
 
         session.commit()
-        print("Демо-данные загружены: 7 пользователей, 3 клуба, 3 аудитории, 5 мероприятий, 4 записи")
+        print("Демо-данные загружены: 7 пользователей, 3 клуба, 3 аудитории, 5 мероприятий, 4 записи, 4 тега")
 
 
 if __name__ == "__main__":

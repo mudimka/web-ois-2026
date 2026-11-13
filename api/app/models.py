@@ -23,6 +23,15 @@ club_organizers = Table(
     Column("club_id", ForeignKey("clubs.id", ondelete="CASCADE"), primary_key=True),
 )
 
+event_tags = Table(
+    "event_tags",
+    Base.metadata,
+    Column("event_id", ForeignKey("events.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
+    # Первичный ключ ускоряет «теги мероприятия», этот индекс — «мероприятия с тегом»
+    Index("event_tags_tag_id_idx", "tag_id"),
+)
+
 
 class User(Base):
     __tablename__ = "users"
@@ -102,6 +111,20 @@ class Event(Base):
     club: Mapped[Club] = relationship()
     room: Mapped[Room] = relationship()
     author: Mapped[User] = relationship()
+    tags: Mapped[list["Tag"]] = relationship(secondary=event_tags, back_populates="events")
+
+
+class Tag(Base):
+    __tablename__ = "tags"
+    __table_args__ = (
+        # «IT» и «it» — один и тот же тег, как и e-mail у users
+        Index("tags_name_key", func.lower(text("name")), unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Identity(always=True), primary_key=True)
+    name: Mapped[str]
+
+    events: Mapped[list[Event]] = relationship(secondary=event_tags, back_populates="tags")
 
 
 class Registration(Base):
