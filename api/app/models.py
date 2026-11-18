@@ -11,7 +11,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import ExcludeConstraint
+from sqlalchemy.dialects.postgresql import JSONB, ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -148,3 +148,33 @@ class AuthSession(Base):
     expires_at: Mapped[datetime]
 
     user: Mapped[User] = relationship()
+
+
+class LoginAttempt(Base):
+    """Неудачная попытка входа. Хранится по email, а не по пользователю:
+    так неизвестный и известный email ведут себя одинаково (нельзя перебором узнать, кто зарегистрирован)."""
+
+    __tablename__ = "login_attempt"
+    __table_args__ = (Index("login_attempt_email_created_at_idx", "email", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Identity(always=True), primary_key=True)
+    email: Mapped[str]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class AuditLog(Base):
+    """Журнал действий администраторов в админке."""
+
+    __tablename__ = "audit_log"
+    __table_args__ = (Index("audit_log_created_at_idx", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Identity(always=True), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # Журнал переживает удаление пользователя: запись остаётся, user_id становится NULL
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    action: Mapped[str]
+    identity: Mapped[str]
+    object_id: Mapped[str | None]
+    changes: Mapped[dict | None] = mapped_column(JSONB)
+
+    user: Mapped[User | None] = relationship()
