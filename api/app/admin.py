@@ -1,10 +1,12 @@
-import logging
+import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any
 
+import anyio
 from fastapi import FastAPI
-from sqladmin import Admin, ModelView, action
-from sqladmin.audit import LoggingAuditBackend
+from sqladmin import Admin, Flash, ModelView, action
+from sqladmin.audit import AuditBackend, AuditEntry
 from sqladmin.authentication import AuthenticationBackend, get_current_user_id
 from sqlalchemy import func, select
 from starlette.requests import Request
@@ -12,7 +14,8 @@ from starlette.responses import RedirectResponse
 from wtforms import SelectField
 
 from app.db import SessionLocal, engine
-from app.models import AuthSession, Club, Event, Registration, Room, User
+from app.login_limit import lock_email, normalize_email, record_failure, seconds_until_allowed
+from app.models import AuditLog, AuthSession, Club, Event, Registration, Room, User
 from app.security import SESSION_TTL, new_session_token, token_digest, verify_password
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-only-not-a-secret")
@@ -26,21 +29,60 @@ STATUSES = [
 ]
 ROLES = [("student", "студент"), ("organizer", "организатор"), ("admin", "администратор")]
 
-audit_log = logging.getLogger("sqladmin.audit")
-audit_log.setLevel(logging.INFO)
-audit_log.addHandler(logging.StreamHandler())
+
+
+def _to_json(value: Any) -> Any:
+    """Приводит значения из форм админки к тому, что умеет хранить jsonb."""
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if hasattr(value, "id"):  # связанная запись из формы (клуб, аудитория): храним её id
+        return value.id
+    return str(value)
+
+
+class DatabaseAuditBackend(AuditBackend):
+    """Пишет журнал действий админки в таблицу audit_log вместо лога в консоли."""
+
+    def build_row(self, entry: AuditEntry, request: Request) -> AuditLog:
+        return AuditLog(
+            created_at=entry.timestamp,
+            user_id=get_current_user_id(request),
+            action=entry.action,
+            identity=entry.identity,
+            object_id=entry.pk,
+            changes=json.loads(json.dumps(entry.changes, default=_to_json)) if entry.changes else None,
+        )
+
+    async def log(self, entry: AuditEntry, request: Request) -> None:
+        # Сессия синхронная, поэтому пишем в потоке, чтобы не блокировать event loop админки
+        await anyio.to_thread.run_sync(self._save, self.build_row(entry, request))
+
+    @staticmethod
+    def _save(row: AuditLog) -> None:
+        with SessionLocal() as session:
+            session.add(row)
+            session.commit()
+
+
+audit_backend = DatabaseAuditBackend()
 
 
 class AdminAuth(AuthenticationBackend):
     async def login(self, request: Request) -> bool:
         form = await request.form()
-        email = str(form.get("username", "")).strip().lower()
+        email = normalize_email(str(form.get("username", "")))
         password = str(form.get("password", ""))
         with SessionLocal() as session:
-            user = session.scalars(select(User).where(func.lower(User.email) == email)).first()
-            if not verify_password(user.password_hash if user else None, password):
+            # Тот же счётчик неудач, что и у POST /api/auth/login: иначе пароль можно было бы
+            # перебирать через форму админки в обход ограничения
+            lock_email(session, email)
+            if seconds_until_allowed(session, email):
                 return False
-            if not user.is_active or user.role != "admin":
+            user = session.scalars(select(User).where(func.lower(User.email) == email)).first()
+            password_ok = verify_password(user.password_hash if user else None, password)
+            if not password_ok or user is None or not user.is_active or user.role != "admin":
+                record_failure(session, email)
+                session.commit()
                 return False
             token = new_session_token()
             session.add(
@@ -80,6 +122,14 @@ class AdminAuth(AuthenticationBackend):
             return auth is not None and auth.user.is_active and auth.user.role == "admin"
 
 
+def _titles(titles: list[str], limit: int = 3) -> str:
+    """Названия для сообщения администратору. Показываем не больше limit штук: сообщения хранятся
+    в cookie-сессии админки, а cookie браузер не принимает больше ~4 КБ (при отклонении сразу
+    десятков мероприятий список названий переполнил бы её)."""
+    shown = ", ".join(f"«{t[:60]}»" for t in titles[:limit])
+    return shown + (f" и ещё {len(titles) - limit}" if len(titles) > limit else "")
+
+
 class EventAdmin(ModelView, model=Event):
     name = "Мероприятие"
     name_plural = "Мероприятия"
@@ -108,27 +158,58 @@ class EventAdmin(ModelView, model=Event):
         Event.reject_reason: "Причина отклонения",
     }
 
-    async def _set_status(self, request: Request, new_status: str) -> RedirectResponse:
-        pks = [pk for pk in request.query_params.get("pks", "").split(",") if pk]
+    async def on_model_change(self, data: dict, model: Any, is_created: bool, request: Request) -> None:
+        # Правило «отклонить только с причиной» не должно обходиться через форму редактирования
+        if data.get("status") == "rejected" and not (data.get("reject_reason") or "").strip():
+            raise ValueError("Чтобы отклонить мероприятие, укажите причину отклонения")
+
+    async def _moderate(self, request: Request, new_status: str, action_name: str) -> RedirectResponse:
+        pks = [pk for pk in request.query_params.get("pks", "").split(",") if pk.isdigit()]
+        done: list[str] = []
+        no_reason: list[str] = []
         with SessionLocal() as session:
             for pk in pks:
                 event = session.get(Event, int(pk))
-                if event is not None and event.status == "pending":
-                    event.status = new_status
-                    audit_log.info(
-                        "audit action=%s identity=event pk=%s user_id=%s",
-                        new_status, pk, get_current_user_id(request),
+                if event is None or event.status != "pending":
+                    continue
+                changes: dict[str, Any] = {"status": new_status}
+                if new_status == "rejected":
+                    reason = (event.reject_reason or "").strip()
+                    if not reason:
+                        no_reason.append(event.title)  # остаётся на модерации
+                        continue
+                    changes["reject_reason"] = reason
+                event.status = new_status
+                # Строка журнала в той же транзакции, что и смена статуса: либо оба изменения
+                # сохранятся, либо ни одно
+                session.add(
+                    audit_backend.build_row(
+                        AuditEntry(action=action_name, identity=self.identity, pk=pk, changes=changes),
+                        request,
                     )
+                )
+                done.append(event.title)
             session.commit()
+
+        if no_reason:
+            Flash.error(
+                request,
+                f"Не указана причина отклонения: {_titles(no_reason)}. Заполните поле «Причина "
+                "отклонения» в карточке мероприятия и повторите. Мероприятия остались на модерации.",
+                "Не отклонено",
+            )
+        if done:
+            verb = "Опубликовано" if new_status == "published" else "Отклонено"
+            Flash.success(request, f"{verb}: {_titles(done)}")
         return RedirectResponse(request.url_for("admin:list", identity=self.identity), status_code=302)
 
     @action(name="publish", label="Опубликовать", confirmation_message="Опубликовать выбранные мероприятия?")
     async def publish(self, request: Request) -> RedirectResponse:
-        return await self._set_status(request, "published")
+        return await self._moderate(request, "published", "publish")
 
     @action(name="reject", label="Отклонить", confirmation_message="Отклонить выбранные мероприятия?")
     async def reject(self, request: Request) -> RedirectResponse:
-        return await self._set_status(request, "rejected")
+        return await self._moderate(request, "rejected", "reject")
 
 
 class ClubAdmin(ModelView, model=Club):
@@ -169,14 +250,43 @@ class RegistrationAdmin(ModelView, model=Registration):
     column_list = [Registration.id, Registration.event, Registration.user, Registration.status, Registration.created_at]
 
 
+class AuditLogAdmin(ModelView, model=AuditLog):
+    name = "Запись журнала"
+    name_plural = "Журнал"
+    icon = "fa-solid fa-clipboard-list"
+    # Только чтение: журнал нельзя ни создавать, ни править, ни удалять руками
+    can_create = False
+    can_edit = False
+    can_delete = False
+    column_list = [AuditLog.created_at, AuditLog.user, AuditLog.action, AuditLog.identity, AuditLog.object_id]
+    column_details_list = [
+        AuditLog.id, AuditLog.created_at, AuditLog.user, AuditLog.action,
+        AuditLog.identity, AuditLog.object_id, AuditLog.changes,
+    ]
+    column_sortable_list = [AuditLog.created_at, AuditLog.action, AuditLog.identity]
+    column_default_sort = [(AuditLog.created_at, True)]  # True — по убыванию: новые сверху
+    column_formatters = {
+        AuditLog.created_at: lambda log, _: log.created_at.astimezone(TOMSK).strftime("%d.%m.%Y %H:%M:%S"),
+    }
+    column_formatters_detail = column_formatters
+    column_labels = {
+        AuditLog.created_at: "Время",
+        AuditLog.user: "Администратор",
+        AuditLog.action: "Действие",
+        AuditLog.identity: "Раздел",
+        AuditLog.object_id: "ID объекта",
+        AuditLog.changes: "Изменения",
+    }
+
+
 def setup_admin(app: FastAPI) -> Admin:
     admin = Admin(
         app,
         engine,
         title="WEB-ОИС: администрирование",
         authentication_backend=AdminAuth(secret_key=SECRET_KEY),
-        audit_backend=LoggingAuditBackend(),
+        audit_backend=audit_backend,
     )
-    for view in (EventAdmin, ClubAdmin, RoomAdmin, UserAdmin, RegistrationAdmin):
+    for view in (EventAdmin, ClubAdmin, RoomAdmin, UserAdmin, RegistrationAdmin, AuditLogAdmin):
         admin.add_view(view)
     return admin
