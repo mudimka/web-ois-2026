@@ -10,6 +10,16 @@ services:
     volumes:
       - ./api:/app
     env_file: .env
+    environment:
+      # Внутри контейнера база доступна по имени сервиса db и порту 5432 (порт 5433 — снаружи)
+      DATABASE_URL: postgresql+psycopg://webois:webois@db:5432/webois
+      # Только для разработки по http://localhost: на рабочем сервере cookie должна быть Secure (1)
+      COOKIE_SECURE: "0"
+      # Раскомментируйте, чтобы печатать в лог каждый SQL-запрос (docker compose logs -f api)
+      # SQL_ECHO: "1"
+    depends_on:
+      db:
+        condition: service_healthy
 
   db:
     image: postgres:18
