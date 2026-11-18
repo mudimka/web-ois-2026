@@ -93,3 +93,15 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str = Field(examples=["new.student@tsu.ru"])
     password: str = Field(examples=["correct password"])
+
+
+class PasswordChange(BaseModel):
+    old_password: str = Field(examples=["old correct password"])
+    new_password: str = Field(min_length=15, max_length=128, examples=["new correct password"])
+
+
+class MyRegistration(BaseModel):
+    event_id: int
+    title: str
+    starts_at: AwareDatetime
+    room: Room

@@ -82,3 +82,45 @@ def list_participants(event_id: int, user: CurrentUser, session: SessionDep):
         {"user_id": u.id, "full_name": u.full_name, "email": u.email, "created_at": r.created_at}
         for r, u in rows
     ]
+
+
+@router.delete(
+    "/me",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        **UNAUTHORIZED,
+        404: {"model": ErrorResponse, "description": "Мероприятия или активной записи нет"},
+        409: {"model": ErrorResponse, "description": "Мероприятие уже началось (BR-5)"},
+    },
+    summary="Отменить свою запись",
+)
+def cancel_my_registration(event_id: int, user: CurrentUser, session: SessionDep):
+    """Отменяет запись текущего пользователя (BR-5): место освобождается сразу.
+
+    Запись не удаляется, а получает статус `cancelled`: история сохраняется, и на
+    мероприятие можно записаться снова. Отменить можно только до начала мероприятия."""
+    event = session.get(Event, event_id)
+    if event is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Мероприятие не найдено")
+
+    # FOR UPDATE: если одну запись отменяют двумя запросами сразу, второй дождётся первого,
+    # увидит, что активной записи уже нет, и получит 404, а не второй «успешный» ответ
+    registration = session.scalars(
+        select(Registration)
+        .where(
+            Registration.event_id == event_id,
+            Registration.user_id == user.id,
+            Registration.status == "active",
+        )
+        .with_for_update()
+    ).first()
+    if registration is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Активной записи на это мероприятие нет")
+
+    if event.starts_at <= datetime.now(timezone.utc):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Мероприятие уже началось, отменить запись нельзя"
+        )
+
+    registration.status = "cancelled"
+    session.commit()
